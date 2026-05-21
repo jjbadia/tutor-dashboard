@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Panel de control para Tutores</title>
+
+<!-- LIBRERÍAS -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<link href="https://cdn.jsdelivr.net/npm/quill@1.3.7/dist/quill.snow.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/quill@1.3.7/dist/quill.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+
+<style>
+body{
+  font-family:Arial;
+  background:#eef2f7;
+}
+
+.card{
+  background:#fff;
+  border-radius:22px;
+  padding:16px;
+  box-shadow:0 4px 14px rgba(0,0,0,.08);
+}
+
+table th,
+table td{
+  padding:6px;
+  border-bottom:1px solid #e5e7eb;
+  height:44px;
+}
+
+.truncate-2{
+  display:-webkit-box;
+  -webkit-line-clamp:2;
+  -webkit-box-orient:vertical;
+  overflow:hidden;
+}
+
+.name{
+  display:-webkit-box;
+  -webkit-line-clamp:2;
+  -webkit-box-orient:vertical;
+  overflow:hidden;
+  flex:1;
+}
+
+.value{
+  margin-left:12px;
+  font-weight:bold;
+  min-width:40px;
+  text-align:right;
+}
+
+.student-btn{
+  transition:all .3s;
+}
+
+.student-btn:hover{
+  transform:scale(1.04);
+  filter:brightness(1.1);
+}
+
+.app-title{
+  font-size:24px;
+  font-weight:bold;
+}
+</style>
+</head>
+
+<body>
+
+<!-- SUBIDA -->
+<div id="uploadScreen" class="min-h-screen flex items-center justify-center p-6">
+  <div class="card max-w-lg w-full text-center">
+    <h1 class="text-3xl font-bold mb-2">Panel de control para tutores</h1>
+    <div class="text-slate-500 text-sm mb-6">Análisis y seguimiento del alumnado</div>
+    <input type="file" id="fileInput" accept=".csv" class="border rounded p-3 w-full">
+  </div>
+</div>
+
+<!-- APP -->
+<div id="app" class="hidden h-screen overflow-hidden">
+<div class="flex h-full">
+
+<!-- SIDEBAR -->
+<aside class="w-72 bg-slate-900 text-white p-4 overflow-y-auto">
+
+<div class="mb-6">
+  <div class="text-2xl font-bold">📊 Tutor Dashboard</div>
+  <div class="text-sm text-slate-400">Herramienta de gestión académica</div>
+</div>
+
+<button onclick="showGeneralDashboard()" class="w-full bg-blue-600 rounded-xl p-3 mb-3 font-bold">
+Resumen de clase
+</button>
+
+<select id="sortOption" class="w-full p-2 rounded text-black mb-4" onchange="renderStudentList()">
+<option value="alpha">Orden alfabético</option>
+<option value="avg_1EV">Media (1er trimestre)</option>
+<option value="avg_2EV">Media (2º trimestre)</option>
+<option value="avg_3EV">Media (3er trimestre)</option>
+<option value="avg_FINAL">Media (Final)</option>
+<option value="fail_1EV">Suspensos (1er trimestre)</option>
+<option value="fail_2EV">Suspensos (2º trimestre)</option>
+<option value="fail_3EV">Suspensos (3er trimestre)</option>
+<option value="fail_FINAL">Suspensos (Final)</option>
+</select>
+
+<div id="studentList"></div>
+
+</aside>
+
+<!-- CONTENIDO -->
+<main class="flex-1 overflow-y-auto p-4">
+<div id="content"></div>
+</main>
+
+</div>
+</div>
+
+<script>
+
+const LOGO_BASE64='';
+
+const evaluations=['1EV','2EV','3EV','FINAL'];
+let studentsData={},subjects=[];
+let commentsData={};
+
+/* CSV */
+document.getElementById('fileInput').addEventListener('change',e=>{
+  const reader=new FileReader();
+  reader.onload=ev=>{
+    const rows=csvToJsonCustom(ev.target.result);
+    processRows(rows);
+    document.getElementById('uploadScreen').classList.add('hidden');
+    document.getElementById('app').classList.remove('hidden');
+    renderStudentList();
+    showGeneralDashboard();
+  };
+  reader.readAsText(e.target.files[0]);
+});
+
+/* PARSER */
+function parseLine(line){
+  const res=[];
+  let cur='';
+  let inQ=false;
+
+  for(let c of line){
+    if(c=='"') inQ=!inQ;
+    else if(c===','&&!inQ){
+      res.push(cur);
+      cur='';
+    }
+    else cur+=c;
+  }
+
+  res.push(cur);
+
+  return res.map(v=>v.trim().replace(/^"|"$/g,''));
+}
+
+function csvToJsonCustom(text){
+  const raw=text.split('\n');
+  const parsed=[];
+
+  for(let l of raw){
+    l=l.trim();
+    if(!l) continue;
+
+    const p=parseLine(l);
+
+    if(p[0]?.startsWith('(1)')) break;
+
+    parsed.push(p);
+  }
+
+  let headers=parsed[0];
+  headers=headers.slice(1);
+  headers=['nombre',...headers];
+
+  return parsed.slice(1).map(v=>{
+    v=v.slice(1);
+
+    const obj={};
+
+    headers.forEach((h,i)=>obj[h]=v[i]||'');
+
+    return obj;
+  });
+}
+
+/* PROCESO */
+function processRows(rows){
+  studentsData={};
+
+  const headers=Object.keys(rows[0]);
+  const evalKey=headers[1];
+
+  subjects=headers.slice(3).filter(h=>h&&h!=='Media:');
+
+  let current='';
+
+  rows.forEach(r=>{
+    let student=(r.nombre||'').trim();
+
+    if(student) current=student;
+    else student=current;
+
+    const ev=(r[evalKey]||'').trim();
+
+    if(!student||!evaluations.includes(ev)) return;
+
+    if(!studentsData[student]) studentsData[student]={};
+
+    studentsData[student][ev]=r;
+  });
+}
+
+/* COLORES MEDIA */
+function getColorMedia(v){
+  if(v>=9) return '#2563eb';
+  if(v>=8) return '#22c55e';
+  if(v>=6.5) return '#eab308';
+  if(v>=5) return '#f97316';
+  return '#dc2626';
+}
+
+/* SUSPENSOS */
+function countFails(row){
+  if(!row) return 0;
+
+  return subjects
+    .map(s=>getValue(row[s]))
+    .filter(v=>v>0&&v<5)
+    .length;
+}
+
+function getColorFails(n){
+  if(n===0) return '#1e293b';
+
+  const max=4;
+  const t=Math.min(n,max)/max;
+
+  const r=Math.round(30+(220-30)*t);
+  const g=Math.round(41*(1-t));
+  const b=Math.round(59*(1-t));
+
+  return `rgb(${r},${g},${b})`;
+}
+
+/* LISTA */
+function renderStudentList(){
+  const list=document.getElementById('studentList');
+  list.innerHTML='';
+
+  const sort=document.getElementById('sortOption').value;
+
+  let arr=Object.keys(studentsData).map(name=>{
+    let value=0;
+    let row;
+
+    if(sort.startsWith('avg_')){
+      row=studentsData[name][sort.split('_')[1]];
+      value=row?getAverage(row):0;
+    }
+
+    if(sort.startsWith('fail_')){
+      row=studentsData[name][sort.split('_')[1]];
+      value=row?countFails(row):0;
+    }
+
+    return {name,value};
+  });
+
+  if(sort==='alpha') arr.sort((a,b)=>a.name.localeCompare(b.name));
+  else arr.sort((a,b)=>b.value-a.value);
+
+  arr.forEach(obj=>{
+    const b=document.createElement('button');
+
+    let bg='#1e293b';
+
+    if(sort!=='alpha'){
+      bg=sort.startsWith('avg_')
+        ? getColorMedia(obj.value)
+        : getColorFails(obj.value);
+    }
+
+    b.className='student-btn w-full flex p-2 mb-1 rounded-xl';
+    b.style.background=bg;
+    b.style.color=(sort.startsWith('avg_')&&obj.value>=6.5)?'black':'white';
+
+    b.innerHTML=`
+      <span class="name">${obj.name}</span>
+      ${
+        sort==='alpha'
+        ? `<span class="value">➜</span>`
+        : `<span class="value">${sort.startsWith('avg_')?obj.value.toFixed(2):obj.value}</span>`
+      }
+    `;
+
+    b.onclick=()=>showStudentDashboard(obj.name);
+    list.appendChild(b);
+  });
+}
+
+/* DASHBOARD GENERAL */
+function showGeneralDashboard(){
+  const names=Object.keys(studentsData);
+  const medias={};
+  const suspensos={};
+  const alumnos={};
+
+  evaluations.forEach(ev=>{
+    let vals=[];
+    let fails=[];
+
+    names.forEach(s=>{
+      const row=studentsData[s][ev];
+
+      if(row){
+        vals.push(getAverage(row));
+        fails.push(countFails(row));
+      }
+    });
+
+    medias[ev]=avg(vals);
+    suspensos[ev]=fails.reduce((a,b)=>a+b,0);
+    alumnos[ev]=vals.length;
+  });
+
+  document.getElementById('content').innerHTML=`
+
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+
+    <div style="font-size:26px;font-weight:bold;color:black">
+      Resumen de clase
+    </div>
+
+    <div style="display:flex;gap:10px">
+
+      <button
+        onclick="loadCommentsData()"
+        style="
+          background:#334155;
+          color:white;
+          border:none;
+          border-radius:12px;
+          padding:10px 18px;
+          font-weight:bold;
+          cursor:pointer;
+        "
+      >
+        Cargar datos
+      </button>
+
+      <button
+        onclick="saveCommentsData()"
+        style="
+          background:#2563eb;
+          color:white;
+          border:none;
+          border-radius:12px;
+          padding:10px 18px;
+          font-weight:bold;
+          cursor:pointer;
+        "
+      >
+        Guardar datos
+      </button>
+<!--
+      <button
+        onclick="exportGeneralPDF()"
+        style="
+          background:#059669;
+          color:white;
+          border:none;
+          border-radius:12px;
+          padding:10px 18px;
+          font-weight:bold;
+          cursor:pointer;
+        "
+      >
+        Exportar a PDF
+      </button>
+-->
+    </div>
+
+  </div>
+
+  <div
+    style="
+      display:grid;
+      grid-template-columns:repeat(auto-fit,minmax(250px,1fr));
+      gap:20px;
+      margin-bottom:30px;
+    "
+  >
+
+    ${evaluations.map(ev=>`
+
+      <div
+        class="card"
+        style="
+          background:#f8fafc;
+          border-radius:22px;
+          padding:20px;
+        "
+      >
+
+        <div
+          style="
+            color:#64748b;
+            font-size:18px;
+            margin-bottom:10px;
+          "
+        >
+          ${ev}
+        </div>
+
+        <div
+          style="
+            font-size:30px;
+            font-weight:800;
+            color:#4361ee;
+            line-height:1;
+          "
+        >
+          ${medias[ev].toFixed(2)}
+        </div>
+
+        <div
+          style="
+            margin-top:10px;
+            color:#ef4444;
+            font-size:16px;
+          "
+        >
+          Suspensos: ${suspensos[ev]}
+        </div>
+
+        <div
+          style="
+            color:#64748b;
+            font-size:16px;
+          "
+        >
+          Alumnos: ${alumnos[ev]}
+        </div>
+
+      </div>
+
+    `).join('')}
+
+  </div>
+
+  <div class="card">
+    <canvas id="chart"></canvas>
+  </div>`;
+
+  new Chart(document.getElementById('chart'),{
+    data:{
+      labels:names,
+      datasets:[
+        ...evaluations.map(ev=>({
+          type:'bar',
+          label:ev,
+          data:names.map(s=>getAverage(studentsData[s][ev]))
+        })),
+
+        ...evaluations.map(ev=>({
+          type:'line',
+          label:'Media '+ev,
+          data:names.map(()=>medias[ev]),
+          borderWidth:3
+        }))
+      ]
+    },
+
+    options:{
+      responsive:true,
+      animation:false,
+      plugins:{
+        legend:{
+          position:'top'
+        }
+      },
+      scales:{
+        y:{
+          min:0,
+          max:10
+        }
+      }
+    }
+  });
+}
+
+/* DASHBOARD ALUMNO */
+function showStudentDashboard(student){
+
+const d=studentsData[student];
+const names=Object.keys(studentsData);
+
+let classAvg={}, deviation={};
+
+evaluations.forEach(ev=>{
+  let vals=[];
+
+  names.forEach(s=>{
+    const row=studentsData[s][ev];
+
+    if(row){
+      const v=getAverage(row);
+      if(v>0) vals.push(v);
+    }
+  });
+
+  const mC=vals.length?avg(vals):0;
+  const mS=getAverage(d[ev]);
+
+  classAvg[ev]=mC;
+  deviation[ev]=(mS&&mC)?(mS-mC):null;
+});
+
+let rows='';
+
+rows+=`<tr style="background:#e2e8f0;font-weight:bold">
+<td style="text-align:left">Media</td>
+${evaluations.map(ev=>`<td>${getAverage(d[ev]).toFixed(2)}</td>`).join('')}
+</tr>`;
+
+rows+=`<tr style="background:#e2e8f0;font-weight:bold">
+<td style="text-align:left">Media clase</td>
+${evaluations.map(ev=>`<td>${classAvg[ev].toFixed(2)}</td>`).join('')}
+</tr>`;
+
+rows+=`<tr style="background:#e2e8f0;font-weight:bold">
+<td style="text-align:left">Desviación</td>
+${evaluations.map(ev=>{
+  const dv=deviation[ev];
+
+  if(dv===null) return `<td></td>`;
+
+  const color=dv>=0?'green':'red';
+
+  return `<td style="color:${color}">(${dv.toFixed(2)})</td>`;
+}).join('')}
+</tr>`;
+
+subjects.forEach(sub=>{
+rows+=`
+<tr>
+<td style="text-align:left"><div class="truncate-2">${sub}</div></td>
+${evaluations.map(ev=>{
+  const row=d[ev];
+  let val=row?getValue(row[sub]):0;
+  let style='';
+
+  if(val>0&&val<5) style='color:red;font-weight:bold';
+
+  return `<td style="${style}">${val||''}</td>`;
+}).join('')}
+</tr>`;
+});
+
+document.getElementById('content').innerHTML=`
+<div id="studentReport">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+
+<div style="font-size:26px;font-weight:bold">${student}</div>
+
+<button
+  onclick="exportStudentPDF('${student.replace(/'/g,"\'")}')"
+  style="
+    background:#059669;
+    color:white;
+    border:none;
+    border-radius:12px;
+    padding:10px 18px;
+    font-weight:bold;
+    cursor:pointer;
+  "
+>
+  Exportar a PDF
+</button>
+
+</div>
+
+<div class="flex gap-6">
+
+<div style="width:67%">
+<div class="card mb-6"><canvas id="studentChart"></canvas></div>
+<div class="card"><div id="editor"></div></div>
+</div>
+
+<div style="width:33%">
+<div class="card">
+<table style="width:100%;text-align:center">
+<thead>
+<tr style="background:#cbd5f5;font-weight:bold">
+<th style="text-align:left">Asignatura</th>
+${evaluations.map(ev=>`<th>${ev}</th>`).join('')}
+</tr>
+</thead>
+<tbody>${rows}</tbody>
+</table>
+</div>
+</div>
+
+</div>
+</div>
+`;
+
+new Chart(document.getElementById('studentChart'),{
+type:'line',
+data:{
+labels:evaluations,
+datasets:[
+{
+  label:'Alumno',
+  data:evaluations.map(ev=>getAverage(d[ev])),
+  borderColor:'#2563eb'
+},
+{
+  label:'Media curso',
+  data:evaluations.map(ev=>classAvg[ev]),
+  borderColor:'#64748b'
+}
+]
+},
+options:{
+  responsive:true,
+  animation:false,
+  scales:{
+    y:{
+      min:0,
+      max:10
+    }
+  }
+}
+});
+
+const quill = new Quill('#editor',{
+  theme:'snow',
+  modules:{
+    toolbar:[
+      ['bold','italic','underline'],
+      [{color:[]},{background:[]}],
+      [{size:['small',false,'large','huge']}],
+      [{align:[]}],
+      [{list:'ordered'},{list:'bullet'}],
+      ['clean']
+    ]
+  }
+});
+
+if(commentsData[student]){
+  quill.root.innerHTML=commentsData[student];
+}
+
+quill.on('text-change',()=>{
+  commentsData[student]=quill.root.innerHTML;
+});
+}
+
+/* GUARDAR DATOS */
+function saveCommentsData(){
+
+  const data={
+    comments:commentsData,
+    exportDate:new Date().toISOString()
+  };
+
+  const blob=new Blob(
+    [JSON.stringify(data,null,2)],
+    {type:'application/json'}
+  );
+
+  const url=URL.createObjectURL(blob);
+
+  const a=document.createElement('a');
+  a.href=url;
+  a.download='dashboard_comentarios.json';
+
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+
+  URL.revokeObjectURL(url);
+}
+
+/* CARGAR DATOS */
+function loadCommentsData(){
+
+  const input=document.createElement('input');
+  input.type='file';
+  input.accept='.json';
+
+  input.onchange=e=>{
+
+    const file=e.target.files[0];
+    if(!file) return;
+
+    const reader=new FileReader();
+
+    reader.onload=ev=>{
+      try{
+        const data=JSON.parse(ev.target.result);
+
+        commentsData=data.comments||{};
+
+        alert('Datos cargados correctamente');
+      }
+      catch(err){
+        alert('Error al cargar el archivo');
+      }
+    };
+
+    reader.readAsText(file);
+  };
+
+  input.click();
+}
+
+/* EXPORTAR PDF GENERAL */
+async function exportGeneralPDF(){
+
+  const container=document.createElement('div');
+  container.style.background='white';
+  container.style.padding='20px';
+
+  /* DASHBOARD GENERAL */
+  showGeneralDashboard();
+  await new Promise(r=>setTimeout(r,1200));
+
+  const general=document.getElementById('content').cloneNode(true);
+
+  /* REEMPLAZAR CANVAS GENERAL */
+  const originalGeneralCanvas=document.querySelector('#content canvas');
+  const clonedGeneralCanvas=general.querySelector('canvas');
+
+  if(originalGeneralCanvas && clonedGeneralCanvas){
+    const img=document.createElement('img');
+    img.src=originalGeneralCanvas.toDataURL('image/png');
+    img.style.width='100%';
+
+    clonedGeneralCanvas.parentNode.replaceChild(img,clonedGeneralCanvas);
+  }
+
+  container.appendChild(general);
+
+  /* ALUMNOS */
+  for(const student of Object.keys(studentsData)){
+
+    showStudentDashboard(student);
+
+    await new Promise(r=>setTimeout(r,1200));
+
+    const report=document.getElementById('studentReport');
+
+    const clone=report.cloneNode(true);
+
+    /* REEMPLAZAR CANVAS DEL ALUMNO */
+    const originalCanvas=report.querySelector('canvas');
+    const clonedCanvas=clone.querySelector('canvas');
+
+    if(originalCanvas && clonedCanvas){
+      const img=document.createElement('img');
+      img.src=originalCanvas.toDataURL('image/png');
+      img.style.width='100%';
+
+      clonedCanvas.parentNode.replaceChild(img,clonedCanvas);
+    }
+
+    const page=document.createElement('div');
+    page.style.pageBreakBefore='always';
+    page.style.padding='20px';
+
+    page.innerHTML=`
+      <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+        <div style="font-size:18px;font-weight:bold;color:#2563eb">
+          📊 Dashboard
+        </div>
+      </div>
+    `;
+
+    page.appendChild(clone);
+
+    container.appendChild(page);
+  }
+
+  const opt={
+    margin:[12,12,12,12],
+    filename:'dashboard_completo.pdf',
+    image:{type:'jpeg',quality:1},
+    html2canvas:{
+      scale:2,
+      useCORS:true,
+      logging:false
+    },
+    jsPDF:{
+      unit:'mm',
+      format:'a4',
+      orientation:'landscape'
+    }
+  };
+
+  html2pdf().set(opt).from(container).save();
+}
+
+
+/* EXPORTAR PDF ALUMNO */
+async function exportStudentPDF(student){
+
+  await new Promise(r=>setTimeout(r,1200));
+
+  const report=document.getElementById('studentReport');
+
+  const clone=report.cloneNode(true);
+
+  /* REEMPLAZAR CANVAS */
+  const originalCanvas=report.querySelector('canvas');
+  const clonedCanvas=clone.querySelector('canvas');
+
+  if(originalCanvas && clonedCanvas){
+
+    const img=document.createElement('img');
+    img.src=originalCanvas.toDataURL('image/png');
+    img.style.width='100%';
+
+    clonedCanvas.parentNode.replaceChild(img,clonedCanvas);
+  }
+
+  const container=document.createElement('div');
+  container.style.background='white';
+  container.style.padding='20px';
+
+  container.innerHTML=`
+    <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+      <div style="font-size:18px;font-weight:bold;color:#2563eb">
+        📊 Dashboard
+      </div>
+    </div>
+  `;
+
+  container.appendChild(clone);
+
+  const opt={
+    margin:[12,12,12,12],
+    filename:`${student}.pdf`,
+    image:{type:'jpeg',quality:1},
+    html2canvas:{
+      scale:2,
+      useCORS:true,
+      logging:false
+    },
+    jsPDF:{
+      unit:'mm',
+      format:'a4',
+      orientation:'landscape'
+    }
+  };
+
+  html2pdf().set(opt).from(container).save();
+}
+
+/* UTIL */
+function getValue(v){
+  if(!v) return 0;
+
+  if(v.includes('_')) return Number(v.split('_')[1])||0;
+
+  return Number(v.replace(',','.'))||0;
+}
+
+function getAverage(row){
+  if(!row) return 0;
+
+  return avg(
+    subjects
+      .map(s=>getValue(row[s]))
+      .filter(v=>v>0)
+  );
+}
+
+function avg(a){
+  return a.length
+    ? a.reduce((x,y)=>x+y,0)/a.length
+    : 0;
+}
+
+</script>
+</body>
+</html>
